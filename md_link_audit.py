@@ -7,25 +7,44 @@ from urllib.parse import unquote, urlsplit
 
 SKIP_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__'}
 LINK = re.compile(r'!?\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+["\'][^\n]*?["\'])?\s*\)')
-REFERENCE = re.compile(r'^\s{0,3}\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)', re.M)
+REFERENCE = re.compile(r'^ {0,3}\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)', re.M)
 
 
 def mask_code(text):
-    """Keep offsets stable while ignoring fenced and inline code and comments."""
-    text = re.sub(r'<!--[\s\S]*?-->', lambda m: ''.join('\n' if c == '\n' else ' ' for c in m[0]), text)
-    lines = text.splitlines(keepends=True)
-    fence = None
-    for i, line in enumerate(lines):
-        match = re.match(r'^\s{0,3}(`{3,}|~{3,})', line)
-        if fence:
-            close = re.match(r'^\s{0,3}' + re.escape(fence[0]) + '{' + str(len(fence)) + r',}\s*$', line.rstrip('\n'))
-            lines[i] = '\n' if line.endswith('\n') else ''
-            if close:
-                fence = None
-        elif match:
-            fence = match[1]
-            lines[i] = '\n' if line.endswith('\n') else ''
-    return re.sub(r'(`+).*?\1', lambda m: ' ' * len(m[0]), ''.join(lines))
+    """Mask code and comments in source order, preserving offsets and lines."""
+    masked = list(text)
+    position = 0
+    while position < len(text):
+        end = None
+        if position == 0 or text[position - 1] == '\n':
+            opener = re.match(r' {0,3}(`{3,}|~{3,})[^\n]*(?:\n|$)', text[position:])
+            if opener:
+                fence = opener[1]
+                closer = re.compile(
+                    r'^ {0,3}' + re.escape(fence[0]) + '{' + str(len(fence))
+                    + r',}[ \t]*\r?$', re.M)
+                closing = closer.search(text, position + opener.end())
+                end = closing.end() if closing else len(text)
+        if end is None and text.startswith('<!--', position):
+            closing = text.find('-->', position + 4)
+            end = closing + 3 if closing >= 0 else len(text)
+        if end is None and text[position] == '`':
+            run = re.match(r'`+', text[position:])[0]
+            closing = re.search(r'(?<!`)' + re.escape(run) + r'(?!`)',
+                                text[position + len(run):])
+            if closing:
+                end = position + len(run) + closing.end()
+            else:
+                position += len(run)
+                continue
+        if end is None:
+            position += 1
+            continue
+        for index in range(position, end):
+            if text[index] not in '\r\n':
+                masked[index] = ' '
+        position = end
+    return ''.join(masked)
 
 
 def audit(root):
@@ -55,12 +74,15 @@ def audit(root):
                 skipped += 1
                 continue
             checked += 1
-            destination = (source.parent / unquote(parsed.path)).resolve()
             reason = None
-            if not destination.is_relative_to(root):
-                reason = 'target escapes scan root'
-            elif not destination.exists():
-                reason = 'target does not exist'
+            try:
+                destination = (source.parent / unquote(parsed.path)).resolve()
+                if not destination.is_relative_to(root):
+                    reason = 'target escapes scan root'
+                elif not destination.exists():
+                    reason = 'target does not exist'
+            except (OSError, RuntimeError, ValueError) as exc:
+                reason = f'cannot resolve target: {exc}'
             if reason:
                 issues.append({'file': source.relative_to(root).as_posix(), 'line': text.count('\n', 0, match.start()) + 1, 'target': target, 'reason': reason})
     return {'checked': checked, 'skipped': skipped, 'issues': issues}
