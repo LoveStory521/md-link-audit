@@ -79,8 +79,11 @@ def audit(root):
                 destination = (source.parent / unquote(parsed.path)).resolve()
                 if not destination.is_relative_to(root):
                     reason = 'target escapes scan root'
-                elif not destination.exists():
-                    reason = 'target does not exist'
+                else:
+                    try:
+                        destination.stat()
+                    except FileNotFoundError:
+                        reason = 'target does not exist'
             except (OSError, RuntimeError, ValueError) as exc:
                 reason = f'cannot resolve target: {exc}'
             if reason:
