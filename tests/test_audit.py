@@ -53,6 +53,43 @@ class AuditTests(unittest.TestCase):
             self.assertEqual(main([str(self.root), '--json']), 1)
         self.assertEqual(len(json.loads(output.getvalue())['issues']), 1)
 
+    def test_comment_marker_inside_fence_does_not_hide_body_link(self):
+        for fence in ('```', '~~~'):
+            with self.subTest(fence=fence):
+                self.write('README.md', f'{fence}html\n<!--\n{fence}\n[broken](missing.md)\n<!-- end -->\n')
+                result = audit(self.root)
+                self.assertEqual(result['checked'], 1)
+                self.assertEqual(result['issues'][0]['line'], 4)
+
+    def test_fence_inside_comment_does_not_hide_body_link(self):
+        self.write('README.md', '<!--\n```\n-->\n[broken](missing.md)\n')
+        result = audit(self.root)
+        self.assertEqual(result['checked'], 1)
+        self.assertEqual(result['issues'][0]['line'], 4)
+
+    def test_inline_comment_marker_does_not_hide_body_link(self):
+        self.write('README.md', '`<!--`\n[broken](missing.md)\n<!-- end -->\n')
+        result = audit(self.root)
+        self.assertEqual(result['checked'], 1)
+        self.assertEqual(result['issues'][0]['line'], 2)
+
+    def test_reference_line_after_blank_lines(self):
+        self.write('README.md', '# Title\n\n\n  [doc]: missing.md\n')
+        self.assertEqual(audit(self.root)['issues'][0]['line'], 4)
+
+    def test_symlink_loop_reports_issue_and_continues(self):
+        self.write('README.md', '[loop](loop.md)\n[missing](missing.md)\n')
+        (self.root / 'loop.md').symlink_to('loop.md')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = main([str(self.root), '--json'])
+        report = json.loads(output.getvalue())
+        self.assertEqual(status, 1)
+        self.assertEqual(report['checked'], 2)
+        self.assertEqual(len(report['issues']), 2)
+        self.assertIn('cannot resolve target', report['issues'][0]['reason'])
+        self.assertEqual(report['issues'][1]['target'], 'missing.md')
+
     def test_invalid_root(self):
         with self.assertRaises(ValueError):
             audit(self.root / 'absent')
